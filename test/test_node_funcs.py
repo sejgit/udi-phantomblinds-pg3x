@@ -5,7 +5,6 @@
 
 import pytest
 from unittest.mock import Mock, patch
-from pathlib import Path
 
 from utils.node_funcs import (
     FieldSpec,
@@ -14,9 +13,7 @@ from utils.node_funcs import (
     push_to_isy_var,
     pull_from_isy_var,
     _apply_state,
-    _check_db_files_and_migrate,
     _push_drivers,
-    _shelve_file_candidates,
     _VARIABLE_TYPE_MAP,
 )
 
@@ -244,31 +241,6 @@ class TestPushDrivers:
         assert mock_self.setDriver.call_count == 2
 
 
-class TestShelveFileCandidates:
-    """Tests for _shelve_file_candidates function."""
-
-    def test_shelve_file_candidates_finds_db_file(self):
-        """Test finding shelve .db file."""
-        with patch("pathlib.Path.exists") as mock_exists:
-            mock_exists.return_value = True
-            base = Path("db/test_node")
-
-            candidates = list(_shelve_file_candidates(base))
-
-            # Should check for .db, .bak, .dat, .dir extensions
-            assert len(candidates) >= 1
-
-    def test_shelve_file_candidates_with_no_files(self):
-        """Test when no shelve files exist."""
-        with patch("pathlib.Path.exists") as mock_exists:
-            mock_exists.return_value = False
-            base = Path("db/test_node")
-
-            candidates = list(_shelve_file_candidates(base))
-
-            assert len(candidates) == 0
-
-
 class TestPushToIsyVar:
     """Tests for push_to_isy_var function."""
 
@@ -377,10 +349,7 @@ class TestLoadPersistentData:
 
     @patch("utils.node_funcs._push_drivers")
     @patch("utils.node_funcs.store_values")
-    @patch("utils.node_funcs._check_db_files_and_migrate")
-    def test_load_persistent_data_from_polyglot(
-        self, mock_migrate, mock_store, mock_push
-    ):
+    def test_load_persistent_data_from_polyglot(self, mock_store, mock_push):
         """Test loading data from Polyglot persistence."""
         mock_controller = Mock()
         mock_controller.Data = Mock()
@@ -399,45 +368,13 @@ class TestLoadPersistentData:
 
         # Should load from persistence
         assert mock_self.data["field1"] == "value1"
-        # Should not check for migration
-        mock_migrate.assert_not_called()
         # Should store and push
         mock_store.assert_called_once()
         mock_push.assert_called_once()
 
     @patch("utils.node_funcs._push_drivers")
     @patch("utils.node_funcs.store_values")
-    @patch("utils.node_funcs._check_db_files_and_migrate")
-    def test_load_persistent_data_migration(
-        self, mock_migrate, _mock_store, _mock_push
-    ):
-        """Test loading data from migrated shelve files."""
-        mock_controller = Mock()
-        mock_controller.Data = Mock()
-        mock_controller.Data.get = Mock(return_value=None)  # No Polyglot data
-
-        mock_self = Mock()
-        mock_self.controller = mock_controller
-        mock_self.name = "TestNode"
-        mock_self.data = {"field1": "default"}
-
-        FIELDS = {
-            "field1": FieldSpec(driver="GV1", default="default", data_type="state")
-        }
-
-        # Simulate successful migration
-        mock_migrate.return_value = (True, {"field1": "migrated_value"})
-
-        load_persistent_data(mock_self, FIELDS)
-
-        # Should load from migrated data
-        assert mock_self.data["field1"] == "migrated_value"
-        mock_migrate.assert_called_once()
-
-    @patch("utils.node_funcs._push_drivers")
-    @patch("utils.node_funcs.store_values")
-    @patch("utils.node_funcs._check_db_files_and_migrate")
-    def test_load_persistent_data_defaults(self, mock_migrate, _mock_store, _mock_push):
+    def test_load_persistent_data_defaults(self, _mock_store, _mock_push):
         """Test loading with no data uses defaults."""
         mock_controller = Mock()
         mock_controller.Data = Mock()
@@ -452,102 +389,10 @@ class TestLoadPersistentData:
             "field1": FieldSpec(driver="GV1", default="default", data_type="state")
         }
 
-        # No migration data
-        mock_migrate.return_value = (False, None)
-
         load_persistent_data(mock_self, FIELDS)
 
         # Should keep defaults
         assert mock_self.data["field1"] == "default"
-
-
-class TestCheckDbFilesAndMigrate:
-    """Tests for _check_db_files_and_migrate function."""
-
-    def test_check_db_files_no_files(self):
-        """Test when no old DB files exist."""
-        with patch("utils.node_funcs._shelve_file_candidates") as mock_candidates:
-            mock_candidates.return_value = []
-
-            mock_self = Mock()
-            mock_self.name = "TestNode"
-            mock_self.address = "addr123"
-
-            migrated, data = _check_db_files_and_migrate(mock_self)
-
-            assert migrated is False
-            assert data is None
-
-    @patch("shelve.open")
-    @patch("utils.node_funcs._shelve_file_candidates")
-    def test_check_db_files_successful_migration(
-        self, mock_candidates, mock_shelve_open
-    ):
-        """Test successful migration from shelve files."""
-        # Mock file candidates
-        mock_file = Mock(spec=Path)
-        mock_file.unlink = Mock()
-        mock_candidates.return_value = [mock_file]
-
-        # Mock shelve data
-        mock_shelf = {"keyaddr123": {"field1": "old_value"}}
-        mock_shelve_open.return_value.__enter__.return_value.get = (
-            lambda k: mock_shelf.get(k)
-        )
-
-        mock_self = Mock()
-        mock_self.name = "TestNode"
-        mock_self.address = "addr123"
-
-        migrated, data = _check_db_files_and_migrate(mock_self)
-
-        assert migrated is True
-        assert data == {"field1": "old_value"}
-        # Should delete the file
-        mock_file.unlink.assert_called_once()
-
-    @patch("shelve.open")
-    @patch("utils.node_funcs._shelve_file_candidates")
-    def test_check_db_files_shelve_exception(self, mock_candidates, mock_shelve_open):
-        """Test shelve.open raises exception during migration."""
-        mock_file = Mock(spec=Path)
-        mock_candidates.return_value = [mock_file]
-
-        # Mock shelve.open to raise exception
-        mock_shelve_open.side_effect = Exception("Shelve error")
-
-        mock_self = Mock()
-        mock_self.name = "TestNode"
-        mock_self.address = "addr123"
-
-        migrated, data = _check_db_files_and_migrate(mock_self)
-
-        assert migrated is False
-        assert data is None
-
-    @patch("shelve.open")
-    @patch("utils.node_funcs._shelve_file_candidates")
-    def test_check_db_files_unlink_error(self, mock_candidates, mock_shelve_open):
-        """Test file deletion errors during migration."""
-        mock_file = Mock(spec=Path)
-        mock_file.unlink = Mock(side_effect=OSError("Cannot delete"))
-        mock_candidates.return_value = [mock_file]
-
-        # Mock shelve data
-        mock_shelf = {"keyaddr123": {"field1": "value"}}
-        mock_shelve_open.return_value.__enter__.return_value.get = (
-            lambda k: mock_shelf.get(k)
-        )
-
-        mock_self = Mock()
-        mock_self.name = "TestNode"
-        mock_self.address = "addr123"
-
-        migrated, data = _check_db_files_and_migrate(mock_self)
-
-        # Should still succeed migration, just log warning about deletion
-        assert migrated is True
-        assert data == {"field1": "value"}
 
 
 class TestGetConfigData:

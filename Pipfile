@@ -9,10 +9,6 @@ requests = "*"
 aiohttp = "*"
 
 [dev-packages]
-pyaml = "*"
-markdown2 = "*"
-pylsp-mypy = "*"
-pyls = "*"
 pytest = "*"
 pre-commit = "*"
 pytest-cov = "*"

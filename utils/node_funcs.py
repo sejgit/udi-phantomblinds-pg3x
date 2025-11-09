@@ -10,10 +10,8 @@ utils/node_funcs.py for NodeServer/Plugin for EISY/Polisy
 """
 
 # standard imports
-import shelve
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, Iterable, Tuple, Optional
-from pathlib import Path
+from typing import Any, Dict, Optional
 from dataclasses import dataclass
 
 # external imports
@@ -61,15 +59,9 @@ def load_persistent_data(self, FIELDS) -> None:
         LOGGER.info("%s, Loaded from persistence", self.name)
     else:
         LOGGER.info(
-            "%s, No persistent data found. Checking for old DB files...", self.name
+            "%s, No persistent data found. Initialize from defaults...", self.name
         )
-        migrated, old_data = _check_db_files_and_migrate(self)
-        if migrated and old_data is not None:
-            _apply_state(self, old_data, FIELDS)
-            LOGGER.info("%s, Migrated from old DB files.", self.name)
-        else:
-            _apply_state(self, {}, FIELDS)  # initialize from defaults
-            LOGGER.info("%s, No old DB files found.", self.name)
+        _apply_state(self, {}, FIELDS)  # initialize from defaults
 
     # Persist and push drivers
     store_values(self)
@@ -82,46 +74,6 @@ def _apply_state(self, src: Dict[str, Any], FIELDS) -> None:
     """
     for field in FIELDS.keys():
         self.data[field] = src.get(field, self.data[field])
-
-
-def _check_db_files_and_migrate(self) -> Tuple[bool, Dict[str, Any] | None]:
-    """
-    Check for deprecated shelve DB files, migrate data, then delete old files.
-    Called by load_persistent_data once during startup.
-    """
-    name_safe = self.name.replace(" ", "_")
-    base = Path("db") / name_safe  # shelve base path (no extension)
-
-    candidates = list(_shelve_file_candidates(base))
-    if not candidates:
-        LOGGER.info("[%s] No old DB files found at base: %s", self.name, base)
-        return False, None
-
-    LOGGER.info("[%s] Old DB files found, migrating data...", self.name)
-
-    key = f"key{self.address}"
-    existing_data = None
-    try:
-        with shelve.open(str(base), flag="r") as s:
-            existing_data = s.get(key)
-    except Exception:
-        LOGGER.exception("[%s] Unexpected error during shelve migration", self.name)
-        return False, None
-
-    # Delete all shelve artifacts after a successful read attempt
-    errors = []
-    for p in candidates:
-        try:
-            p.unlink()
-        except OSError as ex:
-            errors.append((p, ex))
-    if errors:
-        for p, ex in errors:
-            LOGGER.warning("[%s] Could not delete shelve file %s: %s", self.name, p, ex)
-    else:
-        LOGGER.info("[%s] Deleted old shelve files for base: %s", self.name, base)
-
-    return True, existing_data
 
 
 def store_values(self) -> None:
@@ -138,19 +90,6 @@ def _push_drivers(self, FIELDS) -> None:
     for field, spec in FIELDS.items():
         if spec.should_update():
             self.setDriver(spec.driver, self.data[field], report=True, force=True)
-
-
-def _shelve_file_candidates(base: Path) -> Iterable[Path]:
-    """
-    Include the base and any shelve artifacts (base, base.*)
-    """
-    patterns = [base.name, f"{base.name}.*"]
-    seen: set[Path] = set()
-    for pattern in patterns:
-        for p in base.parent.glob(pattern):
-            if p.exists():
-                seen.add(p)
-    return sorted(seen)
 
 
 def get_config_data(self, FIELDS):
