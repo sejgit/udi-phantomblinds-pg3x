@@ -8,7 +8,6 @@ a different type of Hunter Douglas PowerView shade with varying capabilities
 """
 
 # std libraries
-import math
 from datetime import datetime, timezone
 from threading import Thread
 
@@ -98,7 +97,8 @@ class Shade(udi_interface.Node):
             primary: The address of the primary controller node.
             address: The address of this shade node.
             name: The name of this shade node.
-            sid (str): The unique ID of the Hunter Douglas PowerView shade.
+            sid (str): For TaHoma: deviceURL (e.g., "io://1234-5678-9012/12345678")
+                      For PowerView: shade ID (integer)
         """
         super().__init__(poly, primary, address, name)
         self.poly = poly
@@ -106,7 +106,13 @@ class Shade(udi_interface.Node):
         self.controller = poly.getNode(self.primary)
         self.address = address
         self.name = name
+
+        # For TaHoma, sid is the deviceURL string
+        # For PowerView, it's an integer shade ID
         self.sid = sid
+        self.device_url = (
+            sid if isinstance(sid, str) and sid.startswith("io://") else None
+        )
 
         self.tiltCapable = [1, 2, 4, 5, 9, 10]
         self.tiltOnly90Capable = [1, 9]
@@ -125,7 +131,15 @@ class Shade(udi_interface.Node):
         shade ID driver, waits for the controller to be ready, updates its
         initial data, and starts the event polling loop.
         """
-        self.setDriver("GV0", self.sid, report=True, force=True)
+        # For TaHoma, we can't use deviceURL as a driver value (must be numeric)
+        # So we'll use a hash or just set to 1 to indicate it's initialized
+        if self.device_url:
+            # TaHoma device - use hash of deviceURL as numeric ID
+            device_id_hash = abs(hash(self.device_url)) % 9999999
+            self.setDriver("GV0", device_id_hash, report=True, force=True)
+        else:
+            # PowerView device - use integer sid
+            self.setDriver("GV0", self.sid, report=True, force=True)
 
         # wait for controller start ready
         self.controller.ready_event.wait()
@@ -368,6 +382,63 @@ class Shade(udi_interface.Node):
 
         return True
 
+    def update_drivers_from_states(self, states):
+        """Updates node drivers from TaHoma device states.
+
+        Called when DeviceStateChangedEvent is received from TaHoma.
+        Maps TaHoma state names to ISY drivers.
+
+        Args:
+            states (list): List of State objects from TaHoma device
+        """
+        LOGGER.debug(f"Updating drivers for {self.name} from TaHoma states")
+
+        # Map TaHoma state names to driver keys
+        state_driver_map = {
+            "core:ClosureState": ("GV2", 100),  # Primary position (0-100)
+            "core:DeploymentState": ("GV3", 100),  # Secondary position (0-100)
+            "core:SlateOrientationState": ("GV4", 100),  # Tilt angle (0-100)
+            "core:StatusState": ("ST", 2),  # Motion status (boolean)
+            "core:DiscreteRSSILevelState": ("GV11", 25),  # Signal strength (index)
+        }
+
+        for state in states:
+            state_name = state.name if hasattr(state, "name") else None
+            if not state_name:
+                continue
+
+            if state_name in state_driver_map:
+                driver_key, uom = state_driver_map[state_name]
+                value = state.value if hasattr(state, "value") else None
+
+                if value is not None:
+                    # Convert value based on state type
+                    if state_name == "core:StatusState":
+                        # Status: "available" = 0 (not moving), other = 1 (moving)
+                        driver_value = 0 if value == "available" else 1
+                    elif state_name == "core:DiscreteRSSILevelState":
+                        # RSSI: map string to index (0-5)
+                        rssi_map = {
+                            "verylow": 0,
+                            "low": 1,
+                            "normal": 2,
+                            "good": 3,
+                            "verygood": 4,
+                            "excellent": 5,
+                        }
+                        driver_value = rssi_map.get(str(value).lower(), 2)
+                    else:
+                        # Position values: use as-is (already 0-100)
+                        driver_value = int(value)
+
+                    # Update driver
+                    self.setDriver(
+                        driver_key, driver_value, report=True, force=False, uom=uom
+                    )
+                    LOGGER.debug(
+                        f"Updated {driver_key}={driver_value} from state {state_name}"
+                    )
+
     def posToPercent(self, pos):
         """Converts a dictionary of raw position values to percentages.
 
@@ -398,7 +469,10 @@ class Shade(udi_interface.Node):
             command (dict): The command payload from Polyglot.
         """
         LOGGER.info(f"cmd Shade Open {self.lpfx}, {command}")
-        self.setShadePosition({"primary": 100})
+
+        # TaHoma: use 'open' command
+        self.execute_tahoma_command("open", [])
+
         self.reportCmd("OPEN", 2)
         LOGGER.debug(f"Exit {self.lpfx}")
 
@@ -409,21 +483,30 @@ class Shade(udi_interface.Node):
             command (dict): The command payload from Polyglot.
         """
         LOGGER.info(f"cmd Shade Close {self.lpfx}, {command}")
-        self.setShadePosition({"primary": 0})
+
+        # TaHoma: use 'close' command
+        self.execute_tahoma_command("close", [])
+
         self.reportCmd("CLOSE", 2)
         LOGGER.debug(f"Exit {self.lpfx}")
 
     def cmdStop(self, command):
-        """Handles the 'Stop' command from the ISY (Gen 3 only).
+        """Handles the 'Stop' command from the ISY.
 
         Args:
             command (dict): The command payload from Polyglot.
         """
-        if self.controller.generation == 3:
+        LOGGER.info(f"cmd Shade Stop {self.lpfx}, {command}")
+
+        if self.device_url:
+            # TaHoma: use 'stop' command
+            self.execute_tahoma_command("stop", [])
+            self.reportCmd("STOP", 2)
+        elif self.controller.generation == 3:
+            # PowerView Gen 3
             shadeUrl = URL_SHADES_STOP.format(g=self.controller.gateway, id=self.sid)
             self.controller.put(shadeUrl)
             self.reportCmd("STOP", 2)
-            LOGGER.info(f"cmd Shade Stop {self.lpfx}, {command}")
         elif self.controller.generation == 2:
             LOGGER.error(f"cmd Shade Stop error (none in gen2) {self.lpfx}, {command}")
 
@@ -434,8 +517,10 @@ class Shade(udi_interface.Node):
             command (dict): The command payload from Polyglot.
         """
         LOGGER.info(f"cmd Shade TiltOpen {self.lpfx}, {command}")
-        # self.positions["tilt"] = 50
-        self.setShadePosition(pos={"tilt": 50})
+
+        # TaHoma: set orientation to 50 (mid-point, open slats)
+        self.execute_tahoma_command("setOrientation", [50])
+
         self.reportCmd("TILTOPEN", 2)
         LOGGER.debug(f"Exit {self.lpfx}")
 
@@ -446,51 +531,11 @@ class Shade(udi_interface.Node):
             command (dict): The command payload from Polyglot.
         """
         LOGGER.info(f"cmd Shade TiltClose {self.lpfx}, {command}")
-        # self.positions['tilt'] = 0
-        self.setShadePosition(pos={"tilt": 0})
+
+        # TaHoma: set orientation to 0 (closed slats)
+        self.execute_tahoma_command("setOrientation", [0])
+
         self.reportCmd("TILTCLOSE", 2)
-        LOGGER.debug(f"Exit {self.lpfx}")
-
-    def cmdJog(self, command=None):
-        """Handles the 'Jog' command from the ISY.
-
-        For Gen 2 gateways, this also triggers a battery level update.
-
-        Args:
-            command (dict, optional): The command payload from Polyglot.
-                                      Defaults to None.
-        """
-        LOGGER.info(f"cmd Shade Jog {self.lpfx}, {command}")
-        if self.controller.generation == 2:
-            shadeUrl = URL_G2_SHADE_BATTERY.format(
-                g=self.controller.gateway, id=self.sid
-            )
-            body = {}
-        elif self.controller.generation == 3:
-            shadeUrl = URL_SHADES_MOTION.format(g=self.controller.gateway, id=self.sid)
-            body = {"motion": "jog"}
-        else:
-            return
-        self.controller.put(shadeUrl, data=body)
-        self.reportCmd("JOG", 2)
-        LOGGER.debug(f"Exit {self.lpfx}")
-
-    def cmdCalibrate(self, command=None):
-        """Handles the 'Calibrate' command from the ISY (Gen 2 only).
-
-        Args:
-            command (dict, optional): The command payload from Polyglot.
-                                      Defaults to None.
-        """
-        LOGGER.info(f"cmd Shade CALIBRATE {self.lpfx}, {command}")
-        if self.controller.generation == 2:
-            shadeUrl = URL_G2_SHADE.format(g=self.controller.gateway, id=self.sid)
-            body = {"shade": {"motion": "calibrate"}}
-            self.controller.put(shadeUrl, data=body)
-        elif self.controller.generation == 3:
-            LOGGER.error(
-                f"cmd Shade CALIBRATE error, not implimented in G3 {self.lpfx}, {command}"
-            )
         LOGGER.debug(f"Exit {self.lpfx}")
 
     def query(self, command=None):
@@ -538,7 +583,8 @@ class Shade(udi_interface.Node):
 
             if pos:
                 LOGGER.info(f"Shade Setpos {pos}")
-                self.setShadePosition(pos)
+                # TaHoma: convert to appropriate commands
+                self.set_tahoma_positions(pos)
             else:
                 LOGGER.error("Shade Setpos --nothing to set--")
 
@@ -547,100 +593,66 @@ class Shade(udi_interface.Node):
 
         LOGGER.debug(f"Exit {self.lpfx}")
 
-    def _get_g2_positions(self, pos):
-        """Builds the position payload for a Gen 2 gateway.
+    def set_tahoma_positions(self, pos):
+        """Sets TaHoma device positions from position dictionary.
+
+        Maps PowerView-style position dict to TaHoma commands.
 
         Args:
-            pos (dict): A dictionary of target positions (primary, secondary, tilt).
-
-        Returns:
-            dict: The formatted payload for the Gen 2 API.
+            pos (dict): Position dictionary with keys: primary, secondary, tilt
         """
-        positions_array = {}
-
-        if self.capabilities in self.tiltCapable and "tilt" in pos:
-            tilt = pos["tilt"]
-            if self.capabilities in self.tiltOnly90Capable and tilt >= 50:
-                tilt = 49
-            tilt_val = self.fromPercent(tilt, G2_DIVR)
-            positions_array.update({"posKind1": 3, "position1": tilt_val})
-
         if "primary" in pos:
-            pos1 = self.fromPercent(pos["primary"], G2_DIVR)
-            positions_array.update({"posKind1": 1, "position1": pos1})
+            # Primary position -> setClosure command (0=closed, 100=open)
+            self.execute_tahoma_command("setClosure", [pos["primary"]])
 
         if "secondary" in pos:
-            pos2 = self.fromPercent(pos["secondary"], G2_DIVR)
-            positions_array.update({"posKind2": 2, "position2": pos2})
+            # Secondary position -> setDeployment command (for dual shades)
+            self.execute_tahoma_command("setDeployment", [pos["secondary"]])
 
-        return {"shade": {"positions": positions_array}}
+        if "tilt" in pos:
+            # Tilt position -> setOrientation command (0=closed, 100=open)
+            self.execute_tahoma_command("setOrientation", [pos["tilt"]])
 
-    def _get_g3_positions(self, pos):
-        """Builds the position payload for a Gen 3 gateway.
-
-        Args:
-            pos (dict): A dictionary of target positions (primary, secondary, tilt).
-
-        Returns:
-            dict: The formatted payload for the Gen 3 API.
-        """
-        positions_array = {}
-
-        for key, value in pos.items():
-            if key == "tilt" and self.capabilities in self.tiltCapable:
-                if self.capabilities in self.tiltOnly90Capable and value >= 50:
-                    value = 49
-                positions_array["tilt"] = self.fromPercent(value)
-            elif key in ["primary", "secondary", "velocity"]:
-                positions_array[key] = self.fromPercent(value)
-
-        return {"positions": positions_array}
-
-    def setShadePosition(self, pos):
-        """Sends a command to the gateway to set the shade's position.
-
-        This method constructs the appropriate payload for the gateway generation
-        (Gen 2 or Gen 3) and sends the request.
+    def execute_tahoma_command(self, command_name, parameters):
+        """Executes a TaHoma command on this device.
 
         Args:
-            pos (dict): A dictionary of target positions.
+            command_name (str): TaHoma command name (e.g., 'setClosure', 'open', 'stop')
+            parameters (list): Command parameters (e.g., [50] for 50% position)
 
         Returns:
-            bool: True if the command was sent, False otherwise.
+            str: Execution ID or None on failure
         """
-        if self.controller.generation == 2:
-            shade_payload = self._get_g2_positions(pos)
-            shade_url = URL_G2_SHADE.format(g=self.controller.gateway, id=self.sid)
-        elif self.controller.generation == 3:
-            shade_payload = self._get_g3_positions(pos)
-            shade_url = URL_SHADES_POSITIONS.format(
-                g=self.controller.gateway, id=self.sid
+        import asyncio
+
+        try:
+            # Execute command via controller's TaHoma client
+            exec_id = asyncio.run_coroutine_threadsafe(
+                self.controller.tahoma_client.execute_command(
+                    device_url=self.device_url,
+                    command_name=command_name,
+                    parameters=parameters,
+                    label="ISY Control",
+                ),
+                self.controller.mainloop,
+            ).result(timeout=10)
+
+            if exec_id:
+                LOGGER.info(
+                    f"TaHoma command '{command_name}' executed on {self.name} "
+                    f"(exec: {exec_id})"
+                )
+            else:
+                LOGGER.warning(f"TaHoma command '{command_name}' failed on {self.name}")
+
+            return exec_id
+
+        except Exception as e:
+            LOGGER.error(
+                f"Error executing TaHoma command '{command_name}' on {self.name}: {e}",
+                exc_info=True,
             )
-        else:
-            return False
-        self.controller.put(shade_url, data=shade_payload)
-        LOGGER.info(f"setShadePosition = {shade_url} , {shade_payload}")
-        return True
-
-    def fromPercent(self, pos, divr=1.0):
-        """Converts a percentage value to a raw position value for the gateway.
-
-        Args:
-            pos (int or float): The position value as a percentage (0-100).
-            divr (float, optional): The divisor to use for the conversion.
-                                    Defaults to 1.0.
-
-        Returns:
-            int or float: The raw position value for the gateway.
-        """
-        if self.controller.generation == 2:
-            newpos = math.trunc((float(pos) / 100.0) * divr)
-        elif self.controller.generation == 3:
-            newpos = (float(pos) / 100.0) * divr
-        else:
-            return 0
-        LOGGER.debug(f"fromPercent: pos={pos}, becomes {newpos}")
-        return newpos
+            return None
 
     """
     UOMs:
@@ -680,7 +692,6 @@ class Shade(udi_interface.Node):
         "STOP": cmdStop,
         "TILTOPEN": cmdTiltOpen,
         "TILTCLOSE": cmdTiltClose,
-        "JOG": cmdJog,
         "QUERY": query,
         "SETPOS": cmdSetpos,
     }
@@ -717,52 +728,6 @@ class ShadeOnlyPrimary(Shade):
         {"driver": "ST", "value": 0, "uom": 2, "name": "In Motion"},
         {"driver": "GV1", "value": 0, "uom": 107, "name": "Room Id"},
         {"driver": "GV2", "value": None, "uom": 100, "name": "Primary"},
-        {"driver": "GV5", "value": 0, "uom": 25, "name": "Capabilities"},
-        {"driver": "GV6", "value": 0, "uom": 25, "name": "Battery Status"},
-    ]
-
-
-class ShadeOnlySecondary(Shade):
-    """Shade node for shades with only a secondary position control."""
-
-    id = "shadeonlysecondid"
-
-    drivers = [
-        {"driver": "GV0", "value": 0, "uom": 107, "name": "Shade Id"},
-        {"driver": "ST", "value": 0, "uom": 2, "name": "In Motion"},
-        {"driver": "GV1", "value": 0, "uom": 107, "name": "Room Id"},
-        {"driver": "GV3", "value": None, "uom": 100, "name": "Secondary"},
-        {"driver": "GV5", "value": 0, "uom": 25, "name": "Capabilities"},
-        {"driver": "GV6", "value": 0, "uom": 25, "name": "Battery Status"},
-    ]
-
-
-class ShadeNoSecondary(Shade):
-    """Shade node for shades with primary and tilt controls, but no secondary."""
-
-    id = "shadenosecondid"
-
-    drivers = [
-        {"driver": "GV0", "value": 0, "uom": 107, "name": "Shade Id"},
-        {"driver": "ST", "value": 0, "uom": 2, "name": "In Motion"},
-        {"driver": "GV1", "value": 0, "uom": 107, "name": "Room Id"},
-        {"driver": "GV2", "value": None, "uom": 100, "name": "Primary"},
-        {"driver": "GV4", "value": None, "uom": 100, "name": "Tilt"},
-        {"driver": "GV5", "value": 0, "uom": 25, "name": "Capabilities"},
-        {"driver": "GV6", "value": 0, "uom": 25, "name": "Battery Status"},
-    ]
-
-
-class ShadeOnlyTilt(Shade):
-    """Shade node for shades with only a tilt control."""
-
-    id = "shadeonlytiltid"
-
-    drivers = [
-        {"driver": "GV0", "value": 0, "uom": 107, "name": "Shade Id"},
-        {"driver": "ST", "value": 0, "uom": 2, "name": "In Motion"},
-        {"driver": "GV1", "value": 0, "uom": 107, "name": "Room Id"},
-        {"driver": "GV4", "value": None, "uom": 100, "name": "Tilt"},
         {"driver": "GV5", "value": 0, "uom": 25, "name": "Capabilities"},
         {"driver": "GV6", "value": 0, "uom": 25, "name": "Battery Status"},
     ]

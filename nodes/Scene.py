@@ -1,8 +1,7 @@
-"""Module for the Hunter Douglas PowerView Scene node in a Polyglot v3 NodeServer.
+"""Module for Somfy TaHoma Scene node in a Polyglot v3 NodeServer.
 
-This module defines the Scene class, which represents a Hunter Douglas PowerView
-scene. It allows for activation of scenes and monitors their active state based
-on shade positions and gateway events.
+This module defines the Scene class, which represents a Somfy TaHoma scenario.
+It allows for activation of scenarios and monitors their active state.
 
 (C) 2025 Stephen Jenkins
 """
@@ -13,50 +12,14 @@ from threading import Thread
 # external libraries
 import udi_interface
 
-
 LOGGER = udi_interface.LOGGER
 
 
-"""
-HunterDouglas PowerView G3 url's
-"""
-URL_DEFAULT_GATEWAY = "powerview-g3.local"
-URL_GATEWAY = "http://{g}/gateway"
-URL_HOME = "http://{g}/home"
-URL_ROOMS = "http://{g}/home/rooms"
-URL_ROOM = "http://{g}/home/rooms/{id}"
-URL_SHADES = "http://{g}/home/shades/{id}"
-URL_SHADES_MOTION = "http://{g}/home/shades/{id}/motion"
-URL_SHADES_POSITIONS = "http://{g}/home/shades/positions?ids={id}"
-URL_SHADES_STOP = "http://{g}/home/shades/stop?ids={id}"
-URL_SCENES = "http://{g}/home/scenes/{id}"
-URL_SCENES_ACTIVATE = "http://{g}/home/scenes/{id}/activate"
-URL_EVENTS = "http://{g}/home/events"
-URL_EVENTS_SCENES = "http://{g}/home/scenes/events"
-URL_EVENTS_SHADES = "http://{g}/home/shades/events"
-
-
-"""
-HunterDouglas PowerView G2 url's
-from api file: [[https://github.com/sejgit/indigo-powerview/blob/master/PowerView%20API.md]]
-"""
-URL_G2_HUB = "http://{g}/api/userdata/"
-URL_G2_ROOMS = "http://{g}/api/rooms"
-URL_G2_ROOM = "http://{g}/api/rooms/{id}"
-URL_G2_SHADES = "http://{g}/api/shades"
-URL_G2_SHADE = "http://{g}/api/shades/{id}"
-URL_G2_SHADE_BATTERY = "http://{g}/api/shades/{id}?updateBatteryLevel=true"
-URL_G2_SCENES = "http://{g}/api/scenes"
-URL_G2_SCENE = "http://{g}/api/scenes?sceneid={id}"
-URL_G2_SCENES_ACTIVATE = "http://{g}/api/scenes?sceneId={id}"
-G2_DIVR = 65535
-
-
 class Scene(udi_interface.Node):
-    """Polyglot v3 NodeServer node for Hunter Douglas PowerView Scenes.
+    """Polyglot v3 NodeServer node for Somfy TaHoma Scenarios.
 
-    This class represents a Hunter Douglas PowerView scene. It allows for
-    activation of scenes and monitors their active state based on shade
+    This class represents a TaHoma scenario. It allows for
+    activation of scenarios and monitors their active state.
     positions and gateway events.
 
     Attributes:
@@ -483,36 +446,34 @@ class Scene(udi_interface.Node):
         return do_they_agree
 
     def cmdActivate(self, command=None):
-        """Activates the scene on the Hunter Douglas PowerView gateway.
-
-        This method sends the appropriate command to either a Gen 2 or Gen 3
-        gateway to activate the scene. For Gen 2, it manually updates the
-        driver status as no event is received.
+        """Activates the TaHoma scenario.
 
         Args:
             command (dict, optional): The command payload from Polyglot.
                                       Defaults to None.
         """
         LOGGER.info(f"cmdActivate initiate {self.lpfx} , {command}")
-        if self.controller.generation == 2:
-            activateSceneUrl = URL_G2_SCENES_ACTIVATE.format(
-                g=self.controller.gateway, id=self.sid
-            )
-            self.controller.get(activateSceneUrl)
-        elif self.controller.generation == 3:
-            activateSceneUrl = URL_SCENES_ACTIVATE.format(
-                g=self.controller.gateway, id=self.sid
-            )
-            self.controller.put(activateSceneUrl)
 
-        # for PowerView G2 gateway there is no event so manually trigger activate
-        # PowerView G3 will receive an activate event when the motion is complete
-        if self.controller.generation == 2:
-            # manually turn on for G2, turn off on the next longPoll
-            self.setDriver("ST", 1, report=True, force=True)
-            self.reportCmd("DON", 2)
-        # send activate command for both gen2 and gen3
-        # the DON command will come with the scene event
+        # Execute TaHoma scenario
+        import asyncio
+
+        try:
+            exec_id = asyncio.run_coroutine_threadsafe(
+                self.controller.tahoma_client.execute_scenario(self.sid),
+                self.controller.mainloop,
+            ).result(timeout=10)
+
+            if exec_id:
+                LOGGER.info(f"TaHoma scenario {self.name} activated (exec: {exec_id})")
+            else:
+                LOGGER.warning(f"TaHoma scenario {self.name} activation failed")
+
+        except Exception as e:
+            LOGGER.error(
+                f"Error activating TaHoma scenario {self.name}: {e}", exc_info=True
+            )
+
+        # Send activate command - DON will come with the event
         self.reportCmd("ACTIVATE", 2)
         LOGGER.debug(f"Exit {self.lpfx}")
 

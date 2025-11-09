@@ -1,3 +1,4 @@
 udi_interface
 requests
 aiohttp
+pyoverkiz>=1.13.0

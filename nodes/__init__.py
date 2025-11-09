@@ -1,15 +1,11 @@
-"""Node classes used by the Python template Node Server."""
+"""Node classes for Somfy TaHoma/Phantom Blinds NodeServer."""
 
 from .Scene import Scene
 from .Shade import (
     Shade,
     ShadeNoTilt,
     ShadeOnlyPrimary,
-    ShadeOnlySecondary,
-    ShadeNoSecondary,
-    ShadeOnlyTilt,
 )
-from .VirtualGeneric import VirtualGeneric
 from .Controller import Controller
 
 __all__ = [
@@ -17,9 +13,5 @@ __all__ = [
     "Shade",
     "ShadeNoTilt",
     "ShadeOnlyPrimary",
-    "ShadeOnlySecondary",
-    "ShadeNoSecondary",
-    "ShadeOnlyTilt",
     "Controller",
-    "VirtualGeneric",
 ]

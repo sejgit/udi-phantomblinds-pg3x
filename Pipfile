@@ -7,8 +7,10 @@ name = "pypi"
 udi-interface = "*"
 requests = "*"
 aiohttp = "*"
+pyoverkiz = ">=1.13.0"
 
 [dev-packages]
 pytest = "*"
 pre-commit = "*"
 pytest-cov = "*"
+pytest-asyncio = "*"
