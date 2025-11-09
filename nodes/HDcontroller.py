@@ -60,22 +60,6 @@ URL_EVENTS = "http://{g}/home/events?sse=false&raw=true"
 URL_EVENTS_SCENES = "http://{g}/home/scenes/events"
 URL_EVENTS_SHADES = "http://{g}/home/shades/events"
 
-
-"""
-HunterDouglas PowerView G2 url's
-from api file: [[https://github.com/sejgit/indigo-powerview/blob/master/PowerView%20API.md]]
-"""
-URL_G2_HUB = "http://{g}/api/userdata/"
-URL_G2_ROOMS = "http://{g}/api/rooms"
-URL_G2_ROOM = "http://{g}/api/rooms/{id}"
-URL_G2_SHADES = "http://{g}/api/shades"
-URL_G2_SHADE = "http://{g}/api/shades/{id}"
-URL_G2_SHADE_BATTERY = "http://{g}/api/shades/{id}?updateBatteryLevel=true"
-URL_G2_SCENES = "http://{g}/api/scenes"
-URL_G2_SCENE = "http://{g}/api/scenes?sceneid={id}"
-URL_G2_SCENES_ACTIVATE = "http://{g}/api/scenes?sceneId={id}"
-G2_DIVR = 65535
-
 # We need an event loop as we run in a
 # thread which doesn't have a loop
 mainloop = asyncio.get_event_loop()
@@ -110,7 +94,6 @@ class Controller(Node):
         self.update_last = 0.0
         self.update_minimum = 3.0  # do not allow updates more often than this
         self.gateway = URL_DEFAULT_GATEWAY
-        self.generation = 99  # start with unknown, 2 or 3 are only other valid
         self.eventTimer = 0
         self.numNodes = 0
 
@@ -476,7 +459,7 @@ class Controller(Node):
         """Validates the custom parameters for the controller.
 
         This method checks the 'gatewayip' parameter, resolves the gateway
-        address(es), and determines the gateway generation (Gen 2 or Gen 3).
+        address(es).
 
         Returns:
             bool: True if parameters are valid, False otherwise.
@@ -518,12 +501,7 @@ class Controller(Node):
         if not self._goodip():
             return False
         LOGGER.info(f"good IPs:{self.gateways}")
-
-        # set self.generation during G2 or G3 check
-        if self._g2_or_g3():
-            return True
-        else:
-            return False
+        return True
 
     def _goodip(self) -> bool:
         """Validates a list of gateway IP addresses.
@@ -552,48 +530,6 @@ class Controller(Node):
         )
         return False
 
-    def _g2_or_g3(self):
-        """Determines if the configured gateways are Gen 2 or Gen 3.
-
-        It checks the list of gateways to find a responsive primary gateway and
-        sets the `self.generation` attribute accordingly.
-
-        Returns:
-            bool: True if a supported gateway is found, False otherwise.
-        """
-        if self._set_gateway(3, self._is_g3_primary) or self._set_gateway(
-            2, self._is_g2
-        ):
-            LOGGER.info(f"good!! gateway:{self.gateway}, gateways:{self.gateways}")
-            self.Notices.delete("gateway")
-            self.Notices.delete("notPrimary")
-            return True
-
-        LOGGER.info(f"No gateway found in {self.gateways}")
-        self.Notices["gateway"] = "Please note no primary gateway found in gatewayip"
-        return False
-
-    def _set_gateway(self, generation, check_func):
-        """Helper function to find and set the active gateway.
-
-        It iterates through the list of potential gateway IPs and uses the
-        provided checking function to identify a valid gateway.
-
-        Args:
-            generation (int): The gateway generation (2 or 3) to set if found.
-            check_func (callable): A function that takes an IP address and returns
-                                 True if it's a valid gateway of the target type.
-
-        Returns:
-            bool: True if a gateway was successfully found and set, False otherwise.
-        """
-        for ip in self.gateways:
-            if check_func(ip):
-                self.gateway = ip
-                self.generation = generation
-                return True
-        return False
-
     def _is_g3_primary(self, ip):
         """Checks if the given IP address is a Gen 3 primary gateway.
 
@@ -614,21 +550,6 @@ class Controller(Node):
             return True
 
         LOGGER.error(f"{ip} is NOT PowerView G3 Primary")
-        return False
-
-    def _is_g2(self, ip):
-        """Checks if the given IP address is a Gen 2 gateway.
-
-        Args:
-            ip (str): The IP address to check.
-
-        Returns:
-            bool: True if the IP belongs to a Gen 2 gateway, False otherwise.
-        """
-        res = self.get(URL_G2_HUB.format(g=ip))
-        if res.status_code == requests.codes.ok:
-            LOGGER.info(f"{ip} is PowerView 2")
-            return True
         return False
 
     def poll(self, flag):
@@ -656,17 +577,12 @@ class Controller(Node):
         if "shortPoll" in flag:
             LOGGER.debug("shortPoll controller")
 
-            # only PowerView gen3 has sse server
-            if self.generation == 2:
-                self.pollUpdate()
-
-            elif self.generation == 3:
-                # start sse polling if not running for G3
-                if not self.sse_client_in:
-                    self.start_sse_client()
-                # eventTimer has no purpose beyond an indicator of how long since the last event
-                self.eventTimer += 1
-                LOGGER.info(f"increment eventTimer = {self.eventTimer}")
+            # start sse polling if not running
+            if not self.sse_client_in:
+                self.start_sse_client()
+            # eventTimer has no purpose beyond an indicator of how long since the last event
+            self.eventTimer += 1
+            LOGGER.info(f"increment eventTimer = {self.eventTimer}")
             self.heartbeat()
 
             # start event polling loop
@@ -674,9 +590,7 @@ class Controller(Node):
                 self.start_event_polling()
 
         if "longPoll" in flag:
-            if self.generation == 3:
-                self.pollUpdate()
-
+            self.pollUpdate()
         LOGGER.debug("exit")
 
     def pollUpdate(self):
@@ -837,11 +751,9 @@ class Controller(Node):
         to listen for real-time events from the gateway.
         """
         LOGGER.debug("start")
-        if self.generation == 3:
-            self.stop_sse_client_event.clear()
-            future = asyncio.run_coroutine_threadsafe(self._client_sse(), self.mainloop)
-            LOGGER.info(f"sse client started: {future}")
-
+        self.stop_sse_client_event.clear()
+        future = asyncio.run_coroutine_threadsafe(self._client_sse(), self.mainloop)
+        LOGGER.info(f"sse client started: {future}")
         LOGGER.debug("exit")
 
     async def _client_sse(self):
@@ -1130,8 +1042,7 @@ class Controller(Node):
     def updateAllFromServer(self):
         """Fetches all data from the gateway for all nodes.
 
-        This method throttles updates to avoid overloading the gateway. It calls
-        the appropriate update method based on the gateway generation.
+        This method throttles updates to avoid overloading the gateway.
 
         Returns:
             bool: True if the update was successful, False otherwise.
@@ -1142,13 +1053,10 @@ class Controller(Node):
         if time.perf_counter() > (self.update_last + self.update_minimum):
             self.update_in = True
             self.last = time.perf_counter()
-            if self.generation == 3:
-                success = self.updateAllFromServerG3(self.getHomeG3())
-                success = self.updateActiveFromServerG3(self.getScenesActiveG3())
-            elif self.generation == 2:
-                success = self.updateAllFromServerG2(self.getHomeG2())
-            else:
-                success = False
+            success = self.updateAllFromServerG3(self.getHomeG3())
+            success = self.updateActiveFromServerG3(self.getScenesActiveG3())
+        else:
+            success = False
         self.update_in = False
         return success
 
@@ -1289,118 +1197,6 @@ class Controller(Node):
                 )
         else:
             LOGGER.error("getScenesActiveG3 self.gateways NONE")
-        return None
-
-    def updateAllFromServerG2(self, data):
-        """Updates internal data maps by making multiple API calls to a Gen 2 hub.
-
-        Unlike Gen 3, Gen 2 requires separate API calls to get room, shade,
-        and scene data.
-
-        Args:
-            data (dict): The initial 'userdata' from the Gen 2 hub.
-
-        Returns:
-            bool: True if all data was fetched and parsed successfully,
-                  False otherwise.
-        """
-        try:
-            if data:
-                self.rooms_map = {}
-                self.scenes_map = {}
-
-                res = self.get(URL_G2_ROOMS.format(g=self.gateway))
-                if res.status_code == requests.codes.ok:
-                    data = res.json()
-                    for room in data["roomData"]:
-                        room["name"] = base64.b64decode(room["name"]).decode()
-                        self.rooms_map[room["id"]] = room
-                    LOGGER.info(f"rooms = {self.rooms_map.keys()}")
-
-                res = self.get(URL_G2_SHADES.format(g=self.gateway))
-                if res.status_code == requests.codes.ok:
-                    data = res.json()
-                    for sh in data["shadeData"]:
-                        LOGGER.debug(f"Update shade {sh['id']}")
-                        name = base64.b64decode(sh["name"]).decode()
-                        room_name = self.rooms_map[sh["roomId"]]["name"][
-                            0:ROOM_NAME_LIMIT
-                        ]
-                        sh["name"] = self.poly.getValidName(
-                            "%s - %s" % (room_name, name)
-                        )
-                        if "positions" in sh:
-                            pos = sh["positions"]
-                            # Use .get() to safely retrieve values and provide defaults
-                            pos_kind1 = pos.get("posKind1")
-                            position1 = pos.get("position1")
-                            position2 = pos.get("position2")
-
-                            if pos_kind1 == 1 and position1 is not None:
-                                pos["primary"] = self.toPercent(position1, G2_DIVR)
-                            elif pos_kind1 == 3:
-                                pos["primary"] = 0
-                                if position1 is not None:
-                                    pos["tilt"] = self.toPercent(position1, G2_DIVR)
-
-                            if position2 is not None:
-                                pos["secondary"] = self.toPercent(position2, G2_DIVR)
-
-                            capabilities = sh.get("capabilities", 0)
-                            if capabilities not in range(1, 11):
-                                sh["capabilities"] = 0
-
-                        self.update_shade_data(sh["id"], sh)
-                    LOGGER.info(f"shades = {list(self.shades_map.keys())}")
-
-                res = self.get(URL_G2_SCENES.format(g=self.gateway))
-                if res.status_code == requests.codes.ok:
-                    data = res.json()
-                    for scene in data["sceneData"]:
-                        name = base64.b64decode(scene["name"]).decode()
-                        if scene["roomId"] is None:
-                            room_name = "Multi"
-                        else:
-                            room_name = self.rooms_map[scene["roomId"]]["name"][
-                                0:ROOM_NAME_LIMIT
-                            ]
-                        scene["name"] = self.poly.getValidName(
-                            "%s - %s" % (room_name, name)
-                        )
-                        self.scenes_map[scene["id"]] = scene
-
-                    LOGGER.info(f"scenes = {list(self.scenes_map.keys())}")
-
-                return True
-            else:
-                LOGGER.error("updateAllfromServerG2, no data")
-                return False
-        except Exception as ex:
-            LOGGER.error(f"updateAllfromServerG2 error:{ex}")
-            return False
-
-    def getHomeG2(self):
-        """Retrieves the main 'userdata' object from a Gen 2 gateway.
-
-        Returns:
-            dict or None: The JSON response from the gateway as a dictionary,
-                          or None if the request fails.
-        """
-        res = self.get(URL_G2_HUB.format(g=self.gateway))
-        code = res.status_code
-        if self.gateways:
-            if code == requests.codes.ok:
-                data = res.json()
-                LOGGER.info(
-                    "getHomeG2 gateway good %s, %s", self.gateway, self.gateways
-                )
-                return data
-            else:
-                LOGGER.error(
-                    "getHomeG2 gateway NOT good %s, %s", self.gateway, self.gateways
-                )
-        else:
-            LOGGER.error("getHomeG2 self.gateways NONE")
         return None
 
     def get(self, url: str) -> requests.Response:
